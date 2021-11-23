@@ -1,142 +1,163 @@
 from math import *
 import random
-from collections import defaultdict
+import numpy as np
 from tictactoe import TicTacToe
 
 
 class Node:
-    def __init__(self, state, move=None, parent=None, empty_spaces=None, turn=None):
-        self.move = move  # the move that got us to this node - "None" for the root node
-        self.parentNode = parent  # "None" for the root node
-        self.childNodes = defaultdict(list)
+    def __init__(self, move=None, parent=None, empty_spaces=None, turn=None):
+        self.move = move
+        self.parentNode = parent
+        self.childNodes = {}
         self.wins = 0
         self.visits = 0
-        if state is None:
-            self.untriedMoves = {}
-        else:
-            self.untriedMoves = {
-                state: list(map(tuple, empty_spaces))
-            }
+        self.untriedMoves = list(map(tuple, empty_spaces))
         self.turn = turn
 
-    def utc_select_child(self, state):
+    @staticmethod
+    def utc(node, visits):
+        return node.wins / node.visits + sqrt(2 * log(visits) / node.visits)
 
-        s = max(
-            self.childNodes[state],
-            key=lambda x: x.wins / x.visits + sqrt(2 * log(self.visits) / x.visits),
-        )
+    def utc_select_child(self):
+        s = max(self.childNodes.values(), key=lambda x: self.utc(x, self.visits))
         return s
 
-    def add_child(self, new_state, state, move, empty_spaces, turn):
+    def random_select(self):
+        s = random.choice(list(self.childNodes.values()))
+        return s
 
-        n = Node(
-            state=new_state,
+    def add_child(self, move, empty_spaces, turn):
+
+        node = Node(
             move=move,
             parent=self,
             empty_spaces=empty_spaces,
             turn=turn,
         )
-        self.untriedMoves[state].remove(move)
-        self.childNodes[state].append(n)
-        return n
+        self.untriedMoves.remove(move)
+        self.childNodes[move] = node
+        return node
 
     def update(self, result):
         self.visits += 1
-        self.wins += result
+        self.wins += result * self.turn
 
     def update_untried_moves(self, state, empty_spaces):
         if state not in self.untriedMoves:
             self.untriedMoves[state] = list(map(tuple, empty_spaces))
 
 
-def uct(env: TicTacToe, itermax, turn):
+def state_to_int(state):
+    return int(''.join(['%s' % (x + 1) for x in state.ravel()]), 3)
 
-    if turn == 1:
-        rootnode = Node(state=env.getHash(), empty_spaces=env.getEmptySpaces(), turn=turn)
+
+def get_empty_spaces(state, done):
+    res = np.where(state == 0)
+    if len(res[0]) == 0 or done:
+        return []
     else:
-        rootnode = Node(state=None, empty_spaces=env.getEmptySpaces(), turn=turn)
+        return [(i, j) for i, j in zip(res[0], res[1])]
 
-    env = TicTacToe(3, 3, 3)
-    for i in range(itermax):
+
+def rollouts(env, policy_cross, policy_zeros):
+    reward = 0
+    done = False
+    clone_env = TicTacToe(3, 3, 3, clone=env)
+    while not done:
+        state = state_to_int(env.board)
+        if env.curTurn == 1 and state in policy_cross:
+            move = policy_cross[state]
+        elif env.curTurn == 0 and state in policy_zeros:
+            move = policy_zeros[state]
+        else:
+            move = random.choice(clone_env.getEmptySpaces())
+        _, reward, done, _ = clone_env.step(move)
+    return reward
+
+
+def simulate_games(env, policy, turn, iterations=1000):
+    env = TicTacToe(3, 3, 3, clone=env)
+    rewards = []
+    root = policy
+    for _ in range(iterations):
         reward = 0
         env.reset()
-        state = env.getHash()
+        done = False
+        policy_exists = True
+        policy = root
+        while not done:
+            if env.curTurn == turn and len(policy.childNodes) > 0 and policy_exists:
+                policy = max(policy.childNodes.values(), key=lambda x: x.wins / x.visits)
+                _, reward, done, _ = env.step(policy.move)
+            elif env.curTurn == turn:
+                move = random.choice(get_empty_spaces(env.board, env.gameOver))
+                _, reward, done, _ = env.step(move)
+            else:
+                move = random.choice(get_empty_spaces(env.board, env.gameOver))
+                _, reward, done, _ = env.step(move)
+                if move in policy.childNodes:
+                    policy = policy.childNodes[move]
+                else:
+                    policy_exists = False
+        rewards.append(reward)
+    return np.mean(rewards)
+
+
+def uct(env: TicTacToe, itermax, policy_cross, policy_zeros):
+
+    rootnode = Node(empty_spaces=env.getEmptySpaces(), turn=0)
+    cross_rewards = []
+    zeros_rewards = []
+    iterations = []
+    for i in range(itermax):
+        reward = 0
+        done = False
+        env.reset()
         node = rootnode
-        if env.curTurn != rootnode.turn:
-            _, reward, _, _ = env.step(random.choice(env.getEmptySpaces()))
-            state = env.getHash()
-            node.update_untried_moves(state, env.getEmptySpaces())
 
         # select leaf
-        while len(node.untriedMoves[state]) == 0 and len(node.childNodes[state]) > 0:
-            node = node.utc_select_child(state)
-            _, reward, _, _ = env.step(node.move)
-            if not env.gameOver:
-                _, reward, _, _ = env.step(random.choice(env.getEmptySpaces()))
-                state = env.getHash()
-                if env.gameOver:
-                    node.update_untried_moves(state, [])
-                    break
-                else:
-                    node.update_untried_moves(state, env.getEmptySpaces())
-            else:
-                state = env.getHash()
-                break
+        while len(node.untriedMoves) == 0 and len(node.childNodes) > 0:
+            node = node.utc_select_child()
+            _, reward, done, _ = env.step(node.move)
 
         # expand leaf
-        if node.untriedMoves[state]:
-            if env.curTurn != rootnode.turn:
-                _, reward, _, _ = env.step(random.choice(env.getEmptySpaces()))
-                node.update_untried_moves(state, env.getEmptySpaces())
-            move = tuple(random.choice(node.untriedMoves[state]))
-            _, reward, _, _ = env.step(move)
-            if not env.gameOver:
-                _, reward, _, _ = env.step(random.choice(env.getEmptySpaces()))
-                new_state = env.getHash()
-                node = node.add_child(
-                    new_state=new_state,
-                    state=state,
-                    move=move,
-                    empty_spaces=env.getEmptySpaces(),
-                    turn=env.curTurn,
-                )
-            else:
-                node = node.add_child(
-                    new_state=env.getHash(),
-                    state=state,
-                    move=move,
-                    empty_spaces=[],
-                    turn=env.curTurn,
-                )
+        if len(node.untriedMoves) > 0:
+            move = random.choice(node.untriedMoves)
+            cur_turn = env.curTurn
+            _, reward, done, _ = env.step(move)
+            node = node.add_child(
+                move=move,
+                empty_spaces=get_empty_spaces(env.board, env.gameOver),
+                turn=cur_turn
+            )
 
         # rollout
-        while not env.gameOver:
-            _, reward, _, _ = env.step(random.choice(env.getEmptySpaces()))
+        if not done:
+            reward = rollouts(env, policy_cross, policy_zeros)
 
         # backprop
         while node is not None:
-            node.update(reward * rootnode.turn)
+            node.update(reward)
             node = node.parentNode
 
-    return rootnode
+        if (i + 1) % 20000 == 0:
+            cross_reward = simulate_games(env, rootnode, 1)
+            zeros_reward = -simulate_games(env, rootnode, -1)
+            cross_rewards.append(cross_reward)
+            zeros_rewards.append(zeros_reward)
+            iterations.append(i + 1)
+            print(f"Iteration {i + 1}, cross reward: {cross_reward}, zeros reward: {zeros_reward}")
+
+    return rootnode, iterations, cross_rewards, zeros_rewards
 
 
 def uct_play_game():
 
-    env = TicTacToe(3, 3, 3)
-    node_cross = uct(env=env, itermax=500_000, turn=1)
-    node_zeros = uct(env=env, itermax=500_000, turn=-1)
-    env.reset()
-    done = False
-    while not done:
-        print(env.board)
-        if env.curTurn == 1:
-            node_cross = max(node_cross.childNodes[env.getHash()], key=lambda x: x.wins)
-            _, _, done, _ = env.step(node_cross.move)
-        else:
-            node_zeros = max(node_zeros.childNodes[env.getHash()], key=lambda x: x.wins)
-            _, _, done, _ = env.step(node_zeros.move)
-    print(env.board)
+    import json
+    policy_cross = json.load(open("4_q_policy_cross.json"))
+    policy_zeros = json.load(open("4_q_policy_zeros.json"))
+    env = TicTacToe(4, 4, 3)
+    uct(env=env, itermax=5_000_000, policy_cross=policy_cross, policy_zeros=policy_zeros)
 
 
 if __name__ == "__main__":
